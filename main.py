@@ -1,0 +1,234 @@
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header
+import os
+import httpx
+from app.database.models import ReceiptCreate
+from app.ocr.parser import ReceiptParser
+from datetime import datetime
+from dotenv import load_dotenv
+import json
+from typing import Any, Dict, Optional
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+# Get the backend URL
+GO_BACKEND_URL = os.getenv('GO_BACKEND_URL', 'http://localhost:8092/api/v1/receipt')
+
+app = FastAPI(title="Receipt OCR Service", version="1.0.0")
+
+
+def serialize_datetime(obj: Any) -> Any:
+    """Convert datetime objects to ISO format strings for JSON serialization"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: serialize_datetime(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_datetime(item) for item in obj]
+    else:
+        return obj
+
+
+@app.post("/receipts/upload")
+async def upload_receipt(
+        file: UploadFile = File(...),
+        authorization: Optional[str] = Header(None)
+):
+    """
+    Upload and process a receipt image using OCR, then send the extracted data to Go backend
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    # Validate file type
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.pdf', '.tiff', '.bmp'}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type {file_ext} not supported. Allowed types: {', '.join(allowed_extensions)}"
+        )
+
+    temp_file_path = None
+
+    try:
+        # Create uploads directory
+        os.makedirs("uploads", exist_ok=True)
+        temp_file_path = os.path.join("uploads", f"temp_{datetime.now().timestamp()}_{file.filename}")
+
+        # Save uploaded file temporarily
+        with open(temp_file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+
+        logger.info(f"Processing file: {file.filename}")
+
+        # Extract text using OCR
+        parser = ReceiptParser()
+        extracted_text = parser.extract_text(temp_file_path)
+
+        if not extracted_text.strip():
+            raise HTTPException(status_code=400, detail="No text could be extracted from the image")
+
+        # Parse the extracted text into structured data
+        parsed_data = parser.parse_receipt(extracted_text)
+
+        # Prepare the payload for Go backend
+        receipt_payload = {
+            "raw_text": extracted_text,
+            "parsed_data": parsed_data,
+            "original_filename": file.filename,
+            "processed_at": datetime.now().isoformat(),
+            "file_type": file_ext
+        }
+
+        # Serialize datetime objects
+        json_ready_payload = serialize_datetime(receipt_payload)
+
+        logger.info(f"Sending data to Go backend: {GO_BACKEND_URL}")
+
+        # Send to Go backend with proper headers
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                GO_BACKEND_URL,
+                json=json_ready_payload,
+                headers=headers
+            )
+
+            if response.status_code not in [200, 201]:
+                logger.error(f"Go backend error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Backend service error: {response.status_code}"
+                )
+
+            backend_response = response.json()
+            logger.info("Successfully sent data to Go backend")
+
+        # Return success response with both extracted and backend data
+        return {
+            "success": True,
+            "message": "Receipt processed successfully",
+            "extracted_text": extracted_text,
+            "parsed_data": parsed_data,
+            "backend_response": backend_response,
+            "filename": file.filename
+        }
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error processing receipt: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing receipt: {str(e)}"
+        )
+
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.info(f"Cleaned up temporary file: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Could not clean up temporary file: {e}")
+
+
+@app.post("/receipts/process-text")
+async def process_receipt_text(
+        text_data: dict,
+        authorization: Optional[str] = Header(None)
+):
+    """
+    Process already extracted text data and send to Go backend
+    Useful if you already have extracted text and just want to send it
+    """
+    try:
+        raw_text = text_data.get("text", "")
+        if not raw_text.strip():
+            raise HTTPException(status_code=400, detail="No text provided")
+
+        # Parse the text
+        parser = ReceiptParser()
+        parsed_data = parser.parse_receipt(raw_text)
+
+        # Prepare payload
+        receipt_payload = {
+            "raw_text": raw_text,
+            "parsed_data": parsed_data,
+            "processed_at": datetime.now().isoformat(),
+            "source": "direct_text_input"
+        }
+
+        # Serialize datetime objects
+        json_ready_payload = serialize_datetime(receipt_payload)
+
+        # Send to Go backend
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                GO_BACKEND_URL,
+                json=json_ready_payload,
+                headers=headers
+            )
+
+            if response.status_code not in [200, 201]:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Backend service error: {response.status_code}"
+                )
+
+            backend_response = response.json()
+
+        return {
+            "success": True,
+            "message": "Text processed successfully",
+            "parsed_data": parsed_data,
+            "backend_response": backend_response
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing text: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing text: {str(e)}"
+        )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "backend_url": GO_BACKEND_URL,
+        "service": "Receipt OCR Service"
+    }
+
+
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "Receipt OCR Service API",
+        "version": "1.0.0",
+        "endpoints": {
+            "upload": "/receipts/upload - Upload and process receipt image",
+            "process_text": "/receipts/process-text - Process extracted text",
+            "health": "/health - Health check"
+        }
+    }
