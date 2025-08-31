@@ -16,11 +16,13 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
+# Load environment variables first
 load_dotenv()
 
 # Get the backend URL
 GO_BACKEND_URL = os.getenv('GO_BACKEND_URL', 'http://localhost:8092/api/v1/receipt')
+
+# Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI(title="Receipt OCR Service", version="1.0.0")
@@ -34,13 +36,30 @@ app.add_middleware(
 )
 
 
-# response = client.chat.completions.create(
-#     model="gpt-4o-mini",  # or gpt-4.1, gpt-3.5-turbo, etc.
-#     messages=[
-#         {"role": "system", "content": "You are a helpful assistant."},
-#         {"role": "user", "content": "check the uploaded file whether the contents extracted from the file make sense"}
-#     ]
-# )
+def validate_receipt_content(extracted_text: str) -> bool:
+    """
+    Use OpenAI to validate if the extracted text makes sense as a receipt
+    """
+    print(extracted_text)
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system",
+                 "content": "You are a helpful assistant that validates receipt content. Respond with 'VALID' if the text appears to be from a receipt or 'INVALID' if it doesn't look like receipt content."},
+                {"role": "user",
+                 "content": f"Check if this extracted text makes sense as a receipt:\n\n{extracted_text}"}
+            ],
+            max_tokens=10,
+            temperature=0
+        )
+
+        result = response.choices[0].message.content.strip().upper()
+        return result == "VALID"
+    except Exception as e:
+        logger.warning(f"OpenAI validation failed: {e}")
+        # If validation fails, assume content is valid to not block processing
+        return True
 
 
 def serialize_datetime(obj: Any) -> Any:
@@ -99,6 +118,13 @@ async def upload_receipt(
         if not extracted_text.strip():
             raise HTTPException(status_code=400, detail="No text could be extracted from the image")
 
+        # Validate extracted content using OpenAI
+        # if not validate_receipt_content(extracted_text):
+        #     raise HTTPException(
+        #         status_code=400,
+        #         detail="The extracted content does not appear to be a valid receipt"
+        #     )
+
         # Parse the extracted text into structured data
         parsed_data = parser.parse_receipt(extracted_text)
 
@@ -121,8 +147,8 @@ async def upload_receipt(
         if authorization:
             headers["Authorization"] = authorization
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            response = await http_client.post(
                 GO_BACKEND_URL,
                 json=json_ready_payload,
                 headers=headers
@@ -182,6 +208,13 @@ async def process_receipt_text(
         if not raw_text.strip():
             raise HTTPException(status_code=400, detail="No text provided")
 
+        # Validate extracted content using OpenAI
+        if not validate_receipt_content(raw_text):
+            raise HTTPException(
+                status_code=400,
+                detail="The provided text does not appear to be a valid receipt"
+            )
+
         # Parse the text
         parser = ReceiptParser()
         parsed_data = parser.parse_receipt(raw_text)
@@ -202,8 +235,8 @@ async def process_receipt_text(
         if authorization:
             headers["Authorization"] = authorization
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            response = await http_client.post(
                 GO_BACKEND_URL,
                 json=json_ready_payload,
                 headers=headers
