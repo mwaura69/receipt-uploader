@@ -249,7 +249,7 @@ async def health_check():
     }
 
 # Example cron job that runs every 5 minutes
-@pycron.cron("*/1 * * * *")
+@pycron.cron("*/5 * * * *")
 async def ping_health_check(now=None):
     if not HEALTH_CHECK_URL:
         print(f"[{datetime.now()}] HEALTH_CHECK_URL not configured, skipping ping")
