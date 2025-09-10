@@ -20,14 +20,14 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Get the backend URL
-GO_BACKEND_URL = os.getenv('GO_BACKEND_URL', 'http://localhost:8092/api/v1/receipt')
+GO_BACKEND_URL = os.getenv('GO_BACKEND_URL', 'https://budget-tracker-cvm8.onrender.com/api/v1/receipt')
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI(title="Receipt OCR Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Allows only your frontend
+    allow_origins=["https://budget-chip.netlify.app/"],  # Allows only your frontend
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
