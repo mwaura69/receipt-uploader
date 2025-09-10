@@ -1,6 +1,10 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Header
 import os
 import httpx
+import pycron
+import asyncio
+import time
+from typing import Optional
 from app.database.models import ReceiptCreate
 from app.ocr.parser import ReceiptParser
 from datetime import datetime
@@ -21,6 +25,7 @@ load_dotenv()
 
 # Get the backend URL
 GO_BACKEND_URL = os.getenv('GO_BACKEND_URL', 'https://budget-tracker-cvm8.onrender.com/api/v1/receipt')
+HEALTH_CHECK_URL=os.getenv('HEALTH_CHECK_URL')
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI(title="Receipt OCR Service", version="1.0.0")
@@ -240,10 +245,43 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "backend_url": GO_BACKEND_URL,
         "service": "Receipt OCR Service"
     }
 
+# Example cron job that runs every 5 minutes
+@pycron.cron("*/1 * * * *")
+async def ping_health_check(now=None):
+    if not HEALTH_CHECK_URL:
+        print(f"[{datetime.now()}] HEALTH_CHECK_URL not configured, skipping ping")
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Add better error handling and logging
+            response = await client.get(HEALTH_CHECK_URL)
+            if response.status_code == 200:
+                logger.info(f"[{datetime.now()}] Health check successful: {HEALTH_CHECK_URL}")
+            else:
+                logger.warning(f"[{datetime.now()}] Health check failed: {response.status_code}")
+    except httpx.ConnectError:
+        logger.error(f"[{datetime.now()}] Connection failed to {HEALTH_CHECK_URL}")
+    except httpx.TimeoutException:
+        logger.error(f"[{datetime.now()}] Timeout connecting to {HEALTH_CHECK_URL}")
+    except Exception as e:
+        logger.error(f"[{datetime.now()}] Failed to ping health app: {e}")
+
+@app.on_event("startup")
+async def start_cron():
+    if HEALTH_CHECK_URL:
+        print("🚀 Starting cron jobs...")
+        # Wait a few seconds for the server to be ready
+        await asyncio.sleep(5)
+        try:
+            pycron.start()
+        except Exception as e:
+            print(f"Failed to start cron jobs: {e}")
+    else:
+        print("Health check URL not configured, skipping cron jobs")
 
 @app.get("/")
 async def root():
@@ -257,3 +295,4 @@ async def root():
             "health": "/health - Health check"
         }
     }
+
