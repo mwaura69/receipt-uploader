@@ -32,7 +32,7 @@ app = FastAPI(title="Receipt OCR Service", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://budget-chip.netlify.app/"],  # Allows only your frontend
+    allow_origins=["*","https://budget-chip.netlify.app/"],  # Allows only your frontend
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
